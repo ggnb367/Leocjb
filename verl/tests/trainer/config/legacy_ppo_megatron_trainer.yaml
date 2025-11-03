@@ -78,6 +78,11 @@ actor_rollout_ref:
       clip_cov_ub: 5.0 # Upper bound for clip-cov loss
       kl_cov_ratio: 0.0002 # Ratio of tokens to be applied kl penalty for kl-cov loss
       ppo_kl_coef: 0.1 # KL divergence penalty coefficient
+      advantage_clip:
+        enable: false
+        positive_coef: 5.0
+        negative_coef: -5.0
+        prob_epsilon: 1.0e-06
     optim:
       optimizer: adam
       lr: 1e-6

@@ -47,6 +47,71 @@ PolicyLossFn = Callable[
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ]
 
+
+def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Retrieve a nested attribute from dataclasses, DictConfig, or dicts."""
+
+    if obj is None:
+        return default
+
+    if isinstance(obj, DictConfig):
+        return obj.get(key, default)
+
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+
+    return getattr(obj, key, default)
+
+
+def _maybe_clip_advantages(
+    advantages: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    response_mask: torch.Tensor,
+    config: Optional[DictConfig | ActorConfig],
+) -> torch.Tensor:
+    """Apply probability-aware advantage clipping if enabled."""
+
+    if config is None:
+        return advantages
+
+    policy_loss_cfg = _cfg_get(config, "policy_loss")
+    clip_cfg = _cfg_get(policy_loss_cfg, "advantage_clip")
+
+    if clip_cfg is None or not _cfg_get(clip_cfg, "enable", False):
+        return advantages
+
+    positive_coef = _cfg_get(clip_cfg, "positive_coef", 5.0)
+    negative_coef = _cfg_get(clip_cfg, "negative_coef", -5.0)
+    prob_epsilon = _cfg_get(clip_cfg, "prob_epsilon", 1e-6)
+
+    with torch.no_grad():
+        mask = response_mask.to(dtype=torch.bool)
+        if not torch.any(mask):
+            return advantages
+
+        # Only materialize the valid tokens to keep the temporary tensors small.
+        valid_advantages = advantages.masked_select(mask)
+        valid_old_log_prob = old_log_prob.masked_select(mask)
+
+        token_prob = torch.exp(valid_old_log_prob).to(valid_advantages.dtype)
+        token_prob = torch.clamp(token_prob, min=0.0, max=1.0)
+        token_prob = torch.clamp(token_prob, min=prob_epsilon)
+
+        adv_max = positive_coef / (token_prob + prob_epsilon)
+        adv_min = negative_coef * token_prob
+
+        clipped_valid_advantages = torch.clamp(
+            valid_advantages,
+            min=adv_min,
+            max=adv_max,
+        )
+
+        # Avoid in-place modification of the caller tensor while keeping the allocation count low.
+        output = advantages.clone()
+        output.masked_scatter_(mask, clipped_valid_advantages)
+
+    return output
+
 POLICY_LOSS_REGISTRY: dict[str, PolicyLossFn] = {}
 
 
@@ -932,6 +997,8 @@ def compute_policy_loss_vanilla(
         + f" but get the value: {clip_ratio_c}."
     )
 
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
@@ -1001,6 +1068,8 @@ def compute_policy_loss_gspo(
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
 
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+
     negative_approx_kl = log_prob - old_log_prob
 
     # compute sequence-level importance ratio:
@@ -1061,6 +1130,8 @@ def compute_policy_loss_gpg(
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via GPG
     """
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+
     pg_losses = -log_prob * advantages
 
     # Apply rollout importance sampling weights if provided
@@ -1124,6 +1195,8 @@ def compute_policy_loss_clip_cov(
     clip_cov_lb = config.policy_loss.clip_cov_lb if config.policy_loss.clip_cov_lb is not None else 1.0
 
     assert clip_cov_ratio > 0, "clip_ratio should be larger than 0."
+
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
 
     negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
@@ -1212,6 +1285,8 @@ def compute_policy_loss_kl_cov(
 
     assert kl_cov_ratio > 0, "kl_cov_ratio should be larger than 0."
 
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+
     negative_approx_kl = log_prob - old_log_prob
     abs_kl = negative_approx_kl.abs()
     ratio = torch.exp(negative_approx_kl)
@@ -1289,6 +1364,8 @@ def compute_policy_loss_geo_mean(
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
+
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
 
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability (uncomment it if you like)

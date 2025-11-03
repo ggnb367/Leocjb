@@ -37,3 +37,8 @@ actor_rollout_ref:
       clip_cov_ub: 5.0 # for clip-cov loss
       kl_cov_ratio: 0.0002 # for kl-cov loss
       ppo_kl_coef: 0.1 # for kl-cov loss
+      advantage_clip:
+        enable: false
+        positive_coef: 5.0
+        negative_coef: -5.0
+        prob_epsilon: 1.0e-06

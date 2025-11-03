@@ -65,6 +65,24 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
+  # Probability-aware advantage clipping configuration
+  advantage_clip:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.workers.config.AdvantageClipConfig
+
+    # Whether to enable probability-aware advantage clipping
+    enable: false
+
+    # Positive coefficient controlling the maximum advantage (c_pos)
+    positive_coef: 5.0
+
+    # Negative coefficient controlling the minimum advantage (c_neg)
+    negative_coef: -5.0
+
+    # Numerical stabiliser added to sampling probabilities
+    prob_epsilon: 1.0e-06
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 
