@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -x
 
+# 解析仓库根目录，确保可以直接引用本地源码
+SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
