@@ -100,6 +100,12 @@ def _maybe_clip_advantages(
         adv_max = positive_coef / (token_prob + prob_epsilon)
         adv_min = negative_coef * token_prob
 
+        # Note: GRPO-style advantages are standardized to have zero mean per prompt
+        # earlier in ``compute_grpo_outcome_advantage``.  Clipping therefore tends to
+        # push both tails (large positives and negatives) back toward the origin.  If
+        # the negative coefficient magnitude is also reduced, the mean advantage will
+        # remain close to zero even when large positive samples are clipped; this is
+        # expected and simply reflects the per-prompt normalization.
         clipped_valid_advantages = torch.clamp(
             valid_advantages,
             min=adv_min,
