@@ -20,6 +20,7 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import math
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -80,9 +81,45 @@ def _maybe_clip_advantages(
     if clip_cfg is None or not _cfg_get(clip_cfg, "enable", False):
         return advantages
 
-    positive_coef = _cfg_get(clip_cfg, "positive_coef", 5.0)
-    negative_coef = _cfg_get(clip_cfg, "negative_coef", -5.0)
+    positive_prob_threshold = _cfg_get(clip_cfg, "positive_prob_threshold")
+    negative_prob_threshold = _cfg_get(clip_cfg, "negative_prob_threshold")
+    positive_coef = _cfg_get(clip_cfg, "positive_coef")
+    negative_coef = _cfg_get(clip_cfg, "negative_coef")
     prob_epsilon = _cfg_get(clip_cfg, "prob_epsilon", 1e-6)
+
+    rollout_n = _cfg_get(config, "rollout_n")
+    if rollout_n is None:
+        rollout_cfg = _cfg_get(config, "rollout")
+        rollout_n = _cfg_get(rollout_cfg, "n")
+
+    if positive_prob_threshold is not None:
+        if rollout_n is None or rollout_n <= 1:
+            raise ValueError(
+                "advantage_clip.positive_prob_threshold requires rollout_n > 1 to infer the coefficient"
+            )
+        if not 0.0 < positive_prob_threshold <= 1.0:
+            raise ValueError("advantage_clip.positive_prob_threshold must be in (0, 1]")
+        # For GRPO the maximal standardized positive advantage equals
+        # (n-1)/sqrt(n) when one sample scores +1 and the rest -1.
+        group_span = (float(rollout_n) - 1.0) / math.sqrt(float(rollout_n))
+        positive_coef = positive_prob_threshold * group_span
+    elif positive_coef is None:
+        positive_coef = 5.0
+
+    if negative_prob_threshold is not None:
+        if rollout_n is None or rollout_n <= 1:
+            raise ValueError(
+                "advantage_clip.negative_prob_threshold requires rollout_n > 1 to infer the coefficient"
+            )
+        if not 0.0 < negative_prob_threshold <= 1.0:
+            raise ValueError("advantage_clip.negative_prob_threshold must be in (0, 1]")
+        # The minimal standardized advantage equals (1-n)/sqrt(n) under the
+        # same reward pattern.
+        group_span = (1.0 - float(rollout_n)) / math.sqrt(float(rollout_n))
+        denom = max(negative_prob_threshold, prob_epsilon)
+        negative_coef = group_span / denom
+    elif negative_coef is None:
+        negative_coef = -5.0
 
     with torch.no_grad():
         mask = response_mask.to(dtype=torch.bool)

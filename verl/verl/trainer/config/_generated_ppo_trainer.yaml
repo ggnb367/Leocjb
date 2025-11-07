@@ -63,6 +63,8 @@ actor_rollout_ref:
       advantage_clip:
         _target_: verl.workers.config.AdvantageClipConfig
         enable: false
+        positive_prob_threshold: null
+        negative_prob_threshold: null
         positive_coef: 5.0
         negative_coef: -5.0
         prob_epsilon: 1.0e-06

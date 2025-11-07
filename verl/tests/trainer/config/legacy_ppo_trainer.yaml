@@ -257,6 +257,11 @@ actor_rollout_ref:
         # Whether to enable probability-aware advantage clipping
         enable: false
 
+        # Probability thresholds used to derive clipping coefficients when set
+        positive_prob_threshold: null
+
+        negative_prob_threshold: null
+
         # Positive coefficient controlling the maximum advantage (c_pos)
         positive_coef: 5.0
 

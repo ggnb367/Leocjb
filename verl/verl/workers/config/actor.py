@@ -40,17 +40,28 @@ class AdvantageClipConfig(BaseConfig):
 
     Args:
         enable (bool): Whether to enable advantage clipping.
-        positive_coef (float): Coefficient :math:`c_{pos}` controlling the
-            maximum positive advantage (higher values relax the clipping).
-        negative_coef (float): Coefficient :math:`c_{neg}` controlling the
-            minimum negative advantage. Typically a negative number.
+        positive_prob_threshold (float | None): Probability threshold
+            :math:`P^{+}` used to derive the positive clipping coefficient based
+            on the group size ``rollout_n``. If ``None``, ``positive_coef`` is
+            used directly.
+        negative_prob_threshold (float | None): Probability threshold
+            :math:`P^{-}` for deriving the negative clipping coefficient. If
+            ``None``, ``negative_coef`` is used directly.
+        positive_coef (float | None): Explicit coefficient :math:`c_{pos}`
+            controlling the maximum positive advantage. Optional when the
+            probability-based threshold is specified.
+        negative_coef (float | None): Explicit coefficient :math:`c_{neg}`
+            controlling the minimum negative advantage. Optional when the
+            probability-based threshold is specified.
         prob_epsilon (float): Numerical stabiliser added to token probabilities
             when computing the upper bound.
     """
 
     enable: bool = False
-    positive_coef: float = 5.0
-    negative_coef: float = -5.0
+    positive_prob_threshold: float | None = None
+    negative_prob_threshold: float | None = None
+    positive_coef: float | None = 5.0
+    negative_coef: float | None = -5.0
     prob_epsilon: float = 1e-6
 
 
