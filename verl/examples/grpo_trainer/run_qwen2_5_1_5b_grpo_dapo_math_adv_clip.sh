@@ -4,7 +4,6 @@ set -x
 # 解析仓库根目录，确保可以直接引用本地源码
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
-export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
@@ -19,7 +18,7 @@ test_files="['$dapo_math_test_path']"
 
 # Note: the leading '+' on advantage_clip overrides makes Hydra create the block
 # automatically when running against older config snapshots that lack it.
-python3 -m verl.trainer.main_ppo \
+PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}" python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
