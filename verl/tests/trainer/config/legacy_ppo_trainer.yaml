@@ -1106,6 +1106,9 @@ trainer:
   # Validation frequency (in training iterations)
   test_freq: -1
 
+  # Interval (in steps) to aggregate and print trajectory outcome ratios; non-positive disables the periodic log
+  trajectory_stats_log_freq: 0
+
   # Number of iterations to warm up the critic before updating policy
   critic_warmup: 0
 

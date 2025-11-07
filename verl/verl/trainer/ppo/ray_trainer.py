@@ -341,6 +341,14 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
+        freq = getattr(self.config.trainer, "trajectory_stats_log_freq", 0)
+        try:
+            freq = int(freq) if freq is not None else 0
+        except (TypeError, ValueError):
+            freq = 0
+        self._trajectory_stats_log_freq = max(freq, 0)
+        self._trajectory_stats_window = {"total": 0, "all_correct": 0, "all_wrong": 0}
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -951,6 +959,75 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _compute_trajectory_outcome_stats(
+        self, reward_tensor: torch.Tensor, response_mask: torch.Tensor
+    ) -> tuple[float, float, int, int, int]:
+        """Return per-batch ratios and counts of all-correct/all-wrong trajectories."""
+
+        with torch.no_grad():
+            valid_token_mask = response_mask > 0
+            has_valid = valid_token_mask.any(dim=-1)
+
+            total = has_valid.sum()
+            if total.item() == 0:
+                return 0.0, 0.0, 0, 0, 0
+
+            positive_ok = torch.logical_or(~valid_token_mask, reward_tensor > 0).all(dim=-1)
+            negative_ok = torch.logical_or(~valid_token_mask, reward_tensor < 0).all(dim=-1)
+
+            all_correct = torch.logical_and(positive_ok, has_valid).sum()
+            all_wrong = torch.logical_and(negative_ok, has_valid).sum()
+
+            total_f = total.float()
+            all_correct_ratio = (all_correct.float() / total_f).item()
+            all_wrong_ratio = (all_wrong.float() / total_f).item()
+
+            return (
+                all_correct_ratio,
+                all_wrong_ratio,
+                int(total.item()),
+                int(all_correct.item()),
+                int(all_wrong.item()),
+            )
+
+    def _update_trajectory_outcome_statistics(
+        self, reward_tensor: torch.Tensor, response_mask: torch.Tensor, current_step: int
+    ) -> dict[str, float]:
+        """Update running statistics and build per-batch metrics."""
+
+        all_correct_ratio, all_wrong_ratio, total, all_correct, all_wrong = self._compute_trajectory_outcome_stats(
+            reward_tensor, response_mask
+        )
+
+        if total > 0 and self._trajectory_stats_log_freq > 0:
+            self._trajectory_stats_window["total"] += total
+            self._trajectory_stats_window["all_correct"] += all_correct
+            self._trajectory_stats_window["all_wrong"] += all_wrong
+
+            if current_step % self._trajectory_stats_log_freq == 0:
+                window_total = self._trajectory_stats_window["total"]
+                if window_total > 0:
+                    window_correct = self._trajectory_stats_window["all_correct"]
+                    window_wrong = self._trajectory_stats_window["all_wrong"]
+                    print(
+                        "[TrajectoryStats] step=%d all_correct_ratio=%.4f all_wrong_ratio=%.4f total_samples=%d"
+                        % (
+                            current_step,
+                            window_correct / window_total,
+                            window_wrong / window_total,
+                            window_total,
+                        )
+                    )
+                else:
+                    print(f"[TrajectoryStats] step={current_step} total_samples=0")
+
+                self._trajectory_stats_window = {"total": 0, "all_correct": 0, "all_wrong": 0}
+
+        return {
+            "reward/trajectory_all_correct_ratio": all_correct_ratio,
+            "reward/trajectory_all_wrong_ratio": all_wrong_ratio,
+        }
+
     def compute_rollout_importance_weights_and_add_to_batch(self, batch: DataProto) -> tuple[DataProto, dict]:
         """Compute rollout importance sampling weights and mismatch metrics, conditionally add weights to batch.
 
@@ -1181,6 +1258,13 @@ class RayPPOTrainer:
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
+
+                        trajectory_metrics = self._update_trajectory_outcome_statistics(
+                            reward_tensor=reward_tensor,
+                            response_mask=response_masks,
+                            current_step=self.global_steps,
+                        )
+                        metrics.update(trajectory_metrics)
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
