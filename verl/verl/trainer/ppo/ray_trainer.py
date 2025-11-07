@@ -960,43 +960,66 @@ class RayPPOTrainer:
         metrics.update(global_balance_stats)
 
     def _compute_trajectory_outcome_stats(
-        self, reward_tensor: torch.Tensor, response_mask: torch.Tensor
+        self,
+        reward_tensor: torch.Tensor,
+        response_mask: torch.Tensor,
+        group_ids: Optional[np.ndarray],
     ) -> tuple[float, float, int, int, int]:
-        """Return per-batch ratios and counts of all-correct/all-wrong trajectories."""
+        """Return ratios/counts of prompts whose rollouts are all correct or all wrong."""
+
+        if group_ids is None:
+            return 0.0, 0.0, 0, 0, 0
 
         with torch.no_grad():
             valid_token_mask = response_mask > 0
             has_valid = valid_token_mask.any(dim=-1)
-
-            total = has_valid.sum()
-            if total.item() == 0:
+            if not torch.any(has_valid):
                 return 0.0, 0.0, 0, 0, 0
 
-            positive_ok = torch.logical_or(~valid_token_mask, reward_tensor > 0).all(dim=-1)
-            negative_ok = torch.logical_or(~valid_token_mask, reward_tensor < 0).all(dim=-1)
+            # Aggregate outcome reward per rollout response.
+            masked_rewards = torch.where(valid_token_mask, reward_tensor, torch.zeros_like(reward_tensor))
+            response_rewards = masked_rewards.sum(dim=-1)
 
-            all_correct = torch.logical_and(positive_ok, has_valid).sum()
-            all_wrong = torch.logical_and(negative_ok, has_valid).sum()
+            # Filter to responses that contain any valid token to avoid counting padding-only items.
+            response_rewards = response_rewards[has_valid]
+            if response_rewards.numel() == 0:
+                return 0.0, 0.0, 0, 0, 0
 
-            total_f = total.float()
-            all_correct_ratio = (all_correct.float() / total_f).item()
-            all_wrong_ratio = (all_wrong.float() / total_f).item()
+            valid_group_ids = np.asarray(group_ids)[has_valid.cpu().numpy()]
 
-            return (
-                all_correct_ratio,
-                all_wrong_ratio,
-                int(total.item()),
-                int(all_correct.item()),
-                int(all_wrong.item()),
-            )
+            prompt_to_rewards: dict[str, list[float]] = {}
+            for gid, reward in zip(valid_group_ids, response_rewards.cpu().tolist()):
+                prompt_to_rewards.setdefault(gid, []).append(reward)
+
+            total_prompts = len(prompt_to_rewards)
+            if total_prompts == 0:
+                return 0.0, 0.0, 0, 0, 0
+
+            all_correct = 0
+            all_wrong = 0
+            for rewards in prompt_to_rewards.values():
+                if all(r > 0 for r in rewards):
+                    all_correct += 1
+                if all(r < 0 for r in rewards):
+                    all_wrong += 1
+
+            total_f = float(total_prompts)
+            all_correct_ratio = all_correct / total_f
+            all_wrong_ratio = all_wrong / total_f
+
+            return all_correct_ratio, all_wrong_ratio, total_prompts, all_correct, all_wrong
 
     def _update_trajectory_outcome_statistics(
-        self, reward_tensor: torch.Tensor, response_mask: torch.Tensor, current_step: int
+        self,
+        reward_tensor: torch.Tensor,
+        response_mask: torch.Tensor,
+        group_ids: Optional[np.ndarray],
+        current_step: int,
     ) -> dict[str, float]:
         """Update running statistics and build per-batch metrics."""
 
         all_correct_ratio, all_wrong_ratio, total, all_correct, all_wrong = self._compute_trajectory_outcome_stats(
-            reward_tensor, response_mask
+            reward_tensor, response_mask, group_ids
         )
 
         if total > 0 and self._trajectory_stats_log_freq > 0:
@@ -1262,6 +1285,7 @@ class RayPPOTrainer:
                         trajectory_metrics = self._update_trajectory_outcome_statistics(
                             reward_tensor=reward_tensor,
                             response_mask=response_masks,
+                            group_ids=batch.non_tensor_batch.get("uid"),
                             current_step=self.global_steps,
                         )
                         metrics.update(trajectory_metrics)
