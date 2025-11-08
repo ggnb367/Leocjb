@@ -452,8 +452,15 @@ class DataParallelPPOActor(BasePPOActor):
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
-                    # Compute policy loss (all functions return 4 values)
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                    # Compute policy loss (functions now also return advantage clipping stats)
+                    (
+                        pg_loss,
+                        pg_clipfrac,
+                        ppo_kl,
+                        pg_clipfrac_lower,
+                        adv_clipfrac_pos,
+                        adv_clipfrac_neg,
+                    ) = policy_loss_fn(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
@@ -498,6 +505,15 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                         }
                     )
+
+                    clip_cfg = self.config.policy_loss.get("advantage_clip", {})
+                    if clip_cfg.get("enable", False):
+                        micro_batch_metrics.update(
+                            {
+                                "actor/adv_clipfrac_pos": adv_clipfrac_pos.detach().item(),
+                                "actor/adv_clipfrac_neg": adv_clipfrac_neg.detach().item(),
+                            }
+                        )
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()

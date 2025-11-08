@@ -446,7 +446,14 @@ class MegatronPPOActor(BasePPOActor):
                 # are computed centrally in ray_trainer.py for consistency and efficiency.
                 # This ensures metrics are computed uniformly across all batches at the trainer level
                 # and avoids redundant computation across workers and micro-batches.
-                pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                (
+                    pg_loss,
+                    pg_clipfrac,
+                    ppo_kl,
+                    pg_clipfrac_lower,
+                    adv_clipfrac_pos,
+                    adv_clipfrac_neg,
+                ) = policy_loss_fn(
                     old_log_prob=old_log_prob,
                     log_prob=log_prob,
                     advantages=advantages,
@@ -464,6 +471,14 @@ class MegatronPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
                 )
+                clip_cfg = self.config.policy_loss.get("advantage_clip", {})
+                if clip_cfg.get("enable", False):
+                    stats.update(
+                        {
+                            "actor/adv_clipfrac_pos": adv_clipfrac_pos.detach().item(),
+                            "actor/adv_clipfrac_neg": adv_clipfrac_neg.detach().item(),
+                        }
+                    )
                 policy_loss = pg_loss
 
             if calculate_entropy:

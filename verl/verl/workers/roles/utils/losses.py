@@ -69,7 +69,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+    (
+        pg_loss,
+        pg_clipfrac,
+        ppo_kl,
+        pg_clipfrac_lower,
+        adv_clipfrac_pos,
+        adv_clipfrac_neg,
+    ) = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
@@ -86,6 +93,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             "pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
         }
     )
+    clip_cfg = config.policy_loss.get("advantage_clip", {})
+    if clip_cfg.get("enable", False):
+        metrics.update(
+            {
+                "adv_clipfrac_pos": adv_clipfrac_pos.detach().item(),
+                "adv_clipfrac_neg": adv_clipfrac_neg.detach().item(),
+            }
+        )
     policy_loss = pg_loss
 
     # add entropy loss

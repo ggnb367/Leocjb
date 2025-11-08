@@ -45,7 +45,14 @@ PolicyLossFn = Callable[
         Optional[DictConfig | AlgoConfig],  # config
         torch.Tensor | None,  # rollout_log_probs
     ],
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ],
 ]
 
 
@@ -69,17 +76,27 @@ def _maybe_clip_advantages(
     old_log_prob: torch.Tensor,
     response_mask: torch.Tensor,
     config: Optional[DictConfig | ActorConfig],
-) -> torch.Tensor:
-    """Apply probability-aware advantage clipping if enabled."""
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Apply probability-aware advantage clipping if enabled.
+
+    Returns
+    -------
+    tuple
+        A tuple of ``(clipped_advantages, pos_fraction, neg_fraction)`` where
+        the fractions correspond to the proportion of valid tokens whose
+        advantages exceeded the positive or negative bounds respectively.
+        When clipping is disabled the original advantages and ``None``
+        statistics are returned.
+    """
 
     if config is None:
-        return advantages
+        return advantages, None, None
 
     policy_loss_cfg = _cfg_get(config, "policy_loss")
     clip_cfg = _cfg_get(policy_loss_cfg, "advantage_clip")
 
     if clip_cfg is None or not _cfg_get(clip_cfg, "enable", False):
-        return advantages
+        return advantages, None, None
 
     positive_prob_threshold = _cfg_get(clip_cfg, "positive_prob_threshold")
     negative_prob_threshold = _cfg_get(clip_cfg, "negative_prob_threshold")
@@ -124,7 +141,8 @@ def _maybe_clip_advantages(
     with torch.no_grad():
         mask = response_mask.to(dtype=torch.bool)
         if not torch.any(mask):
-            return advantages
+            zero = torch.tensor(0.0, device=advantages.device, dtype=advantages.dtype)
+            return advantages, zero, zero
 
         # Only materialize the valid tokens to keep the temporary tensors small.
         valid_advantages = advantages.masked_select(mask)
@@ -149,11 +167,21 @@ def _maybe_clip_advantages(
             max=adv_max,
         )
 
+        clipped_pos = torch.gt(valid_advantages, adv_max)
+        clipped_neg = torch.lt(valid_advantages, adv_min)
+        total_tokens = valid_advantages.numel()
+        if total_tokens == 0:
+            clip_pos_frac = torch.tensor(0.0, device=advantages.device, dtype=advantages.dtype)
+            clip_neg_frac = torch.tensor(0.0, device=advantages.device, dtype=advantages.dtype)
+        else:
+            clip_pos_frac = clipped_pos.float().sum() / total_tokens
+            clip_neg_frac = clipped_neg.float().sum() / total_tokens
+
         # Avoid in-place modification of the caller tensor while keeping the allocation count low.
         output = advantages.clone()
         output.masked_scatter_(mask, clipped_valid_advantages)
 
-    return output
+    return output, clip_pos_frac, clip_neg_frac
 
 POLICY_LOSS_REGISTRY: dict[str, PolicyLossFn] = {}
 
@@ -998,7 +1026,7 @@ def compute_policy_loss_vanilla(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for PPO.
 
@@ -1040,7 +1068,13 @@ def compute_policy_loss_vanilla(
         + f" but get the value: {clip_ratio_c}."
     )
 
-    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    advantages, adv_clipfrac_pos, adv_clipfrac_neg = _maybe_clip_advantages(
+        advantages, old_log_prob, response_mask, config
+    )
+    if adv_clipfrac_pos is None:
+        adv_clipfrac_pos = advantages.new_zeros(())
+    if adv_clipfrac_neg is None:
+        adv_clipfrac_neg = advantages.new_zeros(())
 
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability
@@ -1075,7 +1109,7 @@ def compute_policy_loss_vanilla(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, adv_clipfrac_pos, adv_clipfrac_neg
 
 
 @register_policy_loss("gspo")
@@ -1087,7 +1121,7 @@ def compute_policy_loss_gspo(
     loss_agg_mode: str = "seq-mean-token-mean",
     config: Optional[DictConfig | ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for GSPO.
 
@@ -1111,7 +1145,13 @@ def compute_policy_loss_gspo(
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
 
-    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    advantages, adv_clipfrac_pos, adv_clipfrac_neg = _maybe_clip_advantages(
+        advantages, old_log_prob, response_mask, config
+    )
+    if adv_clipfrac_pos is None:
+        adv_clipfrac_pos = advantages.new_zeros(())
+    if adv_clipfrac_neg is None:
+        adv_clipfrac_neg = advantages.new_zeros(())
 
     negative_approx_kl = log_prob - old_log_prob
 
@@ -1143,11 +1183,11 @@ def compute_policy_loss_gspo(
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
-    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+    pg_clipfrac_lower = pg_loss.new_zeros(())
 
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, adv_clipfrac_pos, adv_clipfrac_neg
 
 
 @register_policy_loss("gpg")
@@ -1159,7 +1199,7 @@ def compute_policy_loss_gpg(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Adapted from
     https://github.com/AMAP-ML/GPG/blob/main/VisualThinker-R1-Zero/src/open-r1-multimodal/src/open_r1/trainer/grpo_trainer.py#L495
     Args:
@@ -1173,7 +1213,13 @@ def compute_policy_loss_gpg(
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via GPG
     """
-    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    advantages, adv_clipfrac_pos, adv_clipfrac_neg = _maybe_clip_advantages(
+        advantages, old_log_prob, response_mask, config
+    )
+    if adv_clipfrac_pos is None:
+        adv_clipfrac_pos = advantages.new_zeros(())
+    if adv_clipfrac_neg is None:
+        adv_clipfrac_neg = advantages.new_zeros(())
 
     pg_losses = -log_prob * advantages
 
@@ -1182,7 +1228,8 @@ def compute_policy_loss_gpg(
         pg_losses = pg_losses * rollout_is_weights
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-    return pg_loss, torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+    zero = pg_loss.new_zeros(())
+    return pg_loss, zero, zero, zero, adv_clipfrac_pos, adv_clipfrac_neg
 
 
 @register_policy_loss("clip_cov")
@@ -1194,7 +1241,7 @@ def compute_policy_loss_clip_cov(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
 
@@ -1239,7 +1286,13 @@ def compute_policy_loss_clip_cov(
 
     assert clip_cov_ratio > 0, "clip_ratio should be larger than 0."
 
-    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    advantages, adv_clipfrac_pos, adv_clipfrac_neg = _maybe_clip_advantages(
+        advantages, old_log_prob, response_mask, config
+    )
+    if adv_clipfrac_pos is None:
+        adv_clipfrac_pos = advantages.new_zeros(())
+    if adv_clipfrac_neg is None:
+        adv_clipfrac_neg = advantages.new_zeros(())
 
     negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
@@ -1284,7 +1337,9 @@ def compute_policy_loss_clip_cov(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, torch.tensor(0.0)
+    zero = pg_loss.new_zeros(())
+
+    return pg_loss, pg_clipfrac, ppo_kl, zero, adv_clipfrac_pos, adv_clipfrac_neg
 
 
 @register_policy_loss("kl_cov")
@@ -1296,7 +1351,7 @@ def compute_policy_loss_kl_cov(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
 
@@ -1328,7 +1383,13 @@ def compute_policy_loss_kl_cov(
 
     assert kl_cov_ratio > 0, "kl_cov_ratio should be larger than 0."
 
-    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    advantages, adv_clipfrac_pos, adv_clipfrac_neg = _maybe_clip_advantages(
+        advantages, old_log_prob, response_mask, config
+    )
+    if adv_clipfrac_pos is None:
+        adv_clipfrac_pos = advantages.new_zeros(())
+    if adv_clipfrac_neg is None:
+        adv_clipfrac_neg = advantages.new_zeros(())
 
     negative_approx_kl = log_prob - old_log_prob
     abs_kl = negative_approx_kl.abs()
@@ -1362,7 +1423,9 @@ def compute_policy_loss_kl_cov(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, torch.tensor(0.0), ppo_kl_abs, torch.tensor(0.0)
+    zero = pg_loss.new_zeros(())
+
+    return pg_loss, zero, ppo_kl_abs, zero, adv_clipfrac_pos, adv_clipfrac_neg
 
 
 @register_policy_loss("geo_mean")
@@ -1374,7 +1437,7 @@ def compute_policy_loss_geo_mean(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for GMPO.
 
@@ -1408,7 +1471,13 @@ def compute_policy_loss_geo_mean(
     if cliprange_high is None:
         cliprange_high = cliprange
 
-    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    advantages, adv_clipfrac_pos, adv_clipfrac_neg = _maybe_clip_advantages(
+        advantages, old_log_prob, response_mask, config
+    )
+    if adv_clipfrac_pos is None:
+        adv_clipfrac_pos = advantages.new_zeros(())
+    if adv_clipfrac_neg is None:
+        adv_clipfrac_neg = advantages.new_zeros(())
 
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability (uncomment it if you like)
@@ -1446,7 +1515,7 @@ def compute_policy_loss_geo_mean(
     pg_clipfrac = verl_F.masked_mean((clipped * (advantages > 0)).float(), response_mask)
     pg_clipfrac_lower = verl_F.masked_mean((clipped * (advantages < 0)).float(), response_mask)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, adv_clipfrac_pos, adv_clipfrac_neg
 
 
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
