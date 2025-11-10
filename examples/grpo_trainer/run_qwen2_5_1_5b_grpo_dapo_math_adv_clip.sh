@@ -35,8 +35,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.policy_loss.advantage_clip.enable=True \
-    actor_rollout_ref.actor.policy_loss.advantage_clip.positive_prob_threshold=0.3 \
-    actor_rollout_ref.actor.policy_loss.advantage_clip.negative_prob_threshold=0.7 \
+    actor_rollout_ref.actor.policy_loss.advantage_clip.positive_coef=0.742 \
+    actor_rollout_ref.actor.policy_loss.advantage_clip.negative_coef=-3.536 \
     actor_rollout_ref.actor.policy_loss.advantage_clip.prob_epsilon=1e-8 \
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
     actor_rollout_ref.actor.entropy_checkpointing=True \

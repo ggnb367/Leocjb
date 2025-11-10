@@ -69,7 +69,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+    policy_loss_output = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
@@ -77,6 +77,17 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss_agg_mode=loss_agg_mode,
         config=config,
     )
+    
+    clip_metrics = None
+    if (
+        isinstance(policy_loss_output, tuple)
+        and len(policy_loss_output) >= 5
+        and isinstance(policy_loss_output[-1], dict)
+    ):
+        *base_outputs, clip_metrics = policy_loss_output
+        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = base_outputs  # type: ignore[misc]
+    else:
+        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_output  # type: ignore[misc]
 
     metrics.update(
         {
@@ -86,6 +97,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             "pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
         }
     )
+    if clip_metrics is not None:
+        metrics.update({k: v.detach().item() for k, v in clip_metrics.items()})
     policy_loss = pg_loss
 
     # add entropy loss

@@ -452,8 +452,7 @@ class DataParallelPPOActor(BasePPOActor):
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
-                    # Compute policy loss (all functions return 4 values)
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                    policy_loss_outputs = policy_loss_fn(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
@@ -462,6 +461,17 @@ class DataParallelPPOActor(BasePPOActor):
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,
                     )
+
+                    clip_metrics = None
+                    if (
+                        isinstance(policy_loss_outputs, tuple)
+                        and len(policy_loss_outputs) >= 5
+                        and isinstance(policy_loss_outputs[-1], dict)
+                    ):
+                        *base_outputs, clip_metrics = policy_loss_outputs
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = base_outputs  # type: ignore[misc]
+                    else:
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_outputs  # type: ignore[misc]
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
@@ -498,6 +508,9 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                         }
                     )
+                    if clip_metrics is not None:
+                        for key, value in clip_metrics.items():
+                            micro_batch_metrics[f"actor/{key}"] = value.detach().item()
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
@@ -505,3 +518,5 @@ class DataParallelPPOActor(BasePPOActor):
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics
+
+
