@@ -251,6 +251,26 @@ actor_rollout_ref:
       # KL divergence penalty coefficient
       ppo_kl_coef: 0.1
 
+      # Probability-aware advantage clipping configuration
+      advantage_clip:
+
+        # Whether to enable probability-aware advantage clipping
+        enable: false
+
+        # Probability thresholds used to derive clipping coefficients when set
+        positive_prob_threshold: null
+
+        negative_prob_threshold: null
+
+        # Positive coefficient controlling the maximum advantage (c_pos)
+        positive_coef: 5.0
+
+        # Negative coefficient controlling the minimum advantage (c_neg)
+        negative_coef: -5.0
+
+        # Numerical stabiliser added to sampling probabilities
+        prob_epsilon: 1.0e-06
+        
     # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
     clip_ratio_c: 3.0
 
@@ -1085,6 +1105,9 @@ trainer:
 
   # Validation frequency (in training iterations)
   test_freq: -1
+
+  # Interval (in steps) to aggregate and print trajectory outcome ratios; non-positive disables the periodic log
+  trajectory_stats_log_freq: 0
 
   # Number of iterations to warm up the critic before updating policy
   critic_warmup: 0

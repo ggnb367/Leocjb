@@ -72,6 +72,14 @@ actor_rollout_ref:
       clip_cov_ub: 5.0
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
+      advantage_clip:
+        _target_: verl.workers.config.AdvantageClipConfig
+        enable: false
+        positive_prob_threshold: null
+        negative_prob_threshold: null
+        positive_coef: 5.0
+        negative_coef: -5.0
+        prob_epsilon: 1.0e-06
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     entropy_coeff: 0
@@ -514,6 +522,7 @@ trainer:
   del_local_ckpt_after_load: false
   val_before_train: true
   test_freq: -1
+  trajectory_stats_log_freq: 0
   critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

@@ -25,8 +25,34 @@ from .engine import FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["PolicyLossConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = [
+    "AdvantageClipConfig",
+    "PolicyLossConfig",
+    "ActorConfig",
+    "FSDPActorConfig",
+    "McoreActorConfig",
+]
 
+
+@dataclass
+class AdvantageClipConfig(BaseConfig):
+    """Configuration for probability-aware advantage clipping.
+    Args:
+        enable (bool): Whether to enable advantage clipping.
+        positive_coef (float): Coefficient :math:`c_{pos}` controlling the
+            maximum positive advantage (higher values relax the clipping).
+        negative_coef (float): Coefficient :math:`c_{neg}` controlling the
+            minimum negative advantage. Typically a negative number.
+        prob_epsilon (float): Numerical stabiliser added to token probabilities
+            when computing the upper bound.
+    """
+
+    enable: bool = False
+    positive_prob_threshold: float | None = None
+    negative_prob_threshold: float | None = None
+    positive_coef: float = 5.0
+    negative_coef: float = -5.0
+    prob_epsilon: float = 1e-6
 
 @dataclass
 class PolicyLossConfig(BaseConfig):
@@ -41,6 +67,8 @@ class PolicyLossConfig(BaseConfig):
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
+        advantage_clip (AdvantageClipConfig): Configuration for
+            probability-aware advantage clipping.
     """
 
     loss_mode: str = "vanilla"
@@ -49,7 +77,7 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
-
+    advantage_clip: AdvantageClipConfig = field(default_factory=AdvantageClipConfig)
 
 @dataclass
 class ActorConfig(BaseConfig):

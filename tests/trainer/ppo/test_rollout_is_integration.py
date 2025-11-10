@@ -83,6 +83,7 @@ class TestRolloutISIntegration:
             config=config_with_rollout_is,
             rollout_is_weights=rollout_is_weights,
         )
+        
 
         # Check loss is valid
         assert isinstance(pg_loss, torch.Tensor)

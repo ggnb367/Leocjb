@@ -22,6 +22,7 @@ __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
 from collections import defaultdict
 from enum import Enum
+import math
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -46,6 +47,175 @@ PolicyLossFn = Callable[
     ],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ]
+
+# def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
+#     """Retrieve a nested attribute from dataclasses, DictConfig, or dicts."""
+
+#     if obj is None:
+#         return default
+
+#     if isinstance(obj, DictConfig):
+#         return obj.get(key, default)
+
+#     if isinstance(obj, dict):
+#         return obj.get(key, default)
+
+#     return getattr(obj, key, default)
+
+
+# def _maybe_clip_advantages(
+#     advantages: torch.Tensor,
+#     old_log_prob: torch.Tensor,
+#     response_mask: torch.Tensor,
+#     config: Optional[DictConfig | ActorConfig],
+# ) -> torch.Tensor:
+#     """Apply probability-aware advantage clipping if enabled."""
+
+#     if config is None:
+#         return advantages
+
+#     policy_loss_cfg = _cfg_get(config, "policy_loss")
+#     clip_cfg = _cfg_get(policy_loss_cfg, "advantage_clip")
+
+#     if clip_cfg is None or not _cfg_get(clip_cfg, "enable", False):
+#         return advantages
+
+#     positive_coef = _cfg_get(clip_cfg, "positive_coef", 5.0)
+#     negative_coef = _cfg_get(clip_cfg, "negative_coef", -5.0)
+#     prob_epsilon = _cfg_get(clip_cfg, "prob_epsilon", 1e-6)
+
+#     with torch.no_grad():
+#         mask = response_mask.to(dtype=torch.bool)
+#         if not torch.any(mask):
+#             return advantages
+
+#         # Only materialize the valid tokens to keep the temporary tensors small.
+#         valid_advantages = advantages.masked_select(mask)
+#         valid_old_log_prob = old_log_prob.masked_select(mask)
+
+#         token_prob = torch.exp(valid_old_log_prob).to(valid_advantages.dtype)
+#         token_prob = torch.clamp(token_prob, min=0.0, max=1.0)
+#         token_prob = torch.clamp(token_prob, min=prob_epsilon)
+
+#         adv_max = positive_coef / (token_prob + prob_epsilon)
+#         adv_min = negative_coef * token_prob
+
+#         clipped_valid_advantages = torch.clamp(
+#             valid_advantages,
+#             min=adv_min,
+#             max=adv_max,
+#         )
+
+#         # Avoid in-place modification of the caller tensor while keeping the allocation count low.
+#         output = advantages.clone()
+#         output.masked_scatter_(mask, clipped_valid_advantages)
+
+#     return output
+def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Retrieve a nested attribute from dataclasses, DictConfig, or dicts."""
+
+    if obj is None:
+        return default
+
+    if isinstance(obj, DictConfig):
+        return obj.get(key, default)
+
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+
+    return getattr(obj, key, default)
+
+
+def _maybe_clip_advantages(#prob clip版本
+    advantages: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    response_mask: torch.Tensor,
+    config: Optional[DictConfig | ActorConfig],
+) -> torch.Tensor:
+    """Apply probability-aware advantage clipping if enabled."""
+
+    if config is None:
+        return advantages
+
+    policy_loss_cfg = _cfg_get(config, "policy_loss")
+    clip_cfg = _cfg_get(policy_loss_cfg, "advantage_clip")
+
+    if clip_cfg is None or not _cfg_get(clip_cfg, "enable", False):
+        return advantages
+
+    positive_prob_threshold = _cfg_get(clip_cfg, "positive_prob_threshold")
+    negative_prob_threshold = _cfg_get(clip_cfg, "negative_prob_threshold")
+    positive_coef = _cfg_get(clip_cfg, "positive_coef")
+    negative_coef = _cfg_get(clip_cfg, "negative_coef")
+    prob_epsilon = _cfg_get(clip_cfg, "prob_epsilon", 1e-6)
+
+    rollout_n = _cfg_get(config, "rollout_n")
+    if rollout_n is None:
+        rollout_cfg = _cfg_get(config, "rollout")
+        rollout_n = _cfg_get(rollout_cfg, "n")
+
+    if positive_prob_threshold is not None:
+        if rollout_n is None or rollout_n <= 1:
+            raise ValueError(
+                "advantage_clip.positive_prob_threshold requires rollout_n > 1 to infer the coefficient"
+            )
+        if not 0.0 < positive_prob_threshold <= 1.0:
+            raise ValueError("advantage_clip.positive_prob_threshold must be in (0, 1]")
+        # For GRPO the maximal standardized positive advantage equals
+        # (n-1)/sqrt(n) when one sample scores +1 and the rest -1.
+        group_span = (float(rollout_n) - 1.0) / math.sqrt(float(rollout_n))
+        positive_coef = positive_prob_threshold * group_span
+    elif positive_coef is None:
+        positive_coef = 5.0
+
+    if negative_prob_threshold is not None:
+        if rollout_n is None or rollout_n <= 1:
+            raise ValueError(
+                "advantage_clip.negative_prob_threshold requires rollout_n > 1 to infer the coefficient"
+            )
+        if not 0.0 < negative_prob_threshold <= 1.0:
+            raise ValueError("advantage_clip.negative_prob_threshold must be in (0, 1]")
+        # The minimal standardized advantage equals (1-n)/sqrt(n) under the
+        # same reward pattern.
+        group_span = (1.0 - float(rollout_n)) / math.sqrt(float(rollout_n))
+        denom = max(negative_prob_threshold, prob_epsilon)
+        negative_coef = group_span / denom
+    elif negative_coef is None:
+        negative_coef = -5.0
+
+    with torch.no_grad():
+        mask = response_mask.to(dtype=torch.bool)
+        if not torch.any(mask):
+            return advantages
+
+        # Only materialize the valid tokens to keep the temporary tensors small.
+        valid_advantages = advantages.masked_select(mask)
+        valid_old_log_prob = old_log_prob.masked_select(mask)
+
+        token_prob = torch.exp(valid_old_log_prob).to(valid_advantages.dtype)
+        token_prob = torch.clamp(token_prob, min=0.0, max=1.0)
+        token_prob = torch.clamp(token_prob, min=prob_epsilon)
+
+        adv_max = positive_coef / (token_prob + prob_epsilon)
+        adv_min = negative_coef * token_prob
+
+        # Note: GRPO-style advantages are standardized to have zero mean per prompt
+        # earlier in ``compute_grpo_outcome_advantage``.  Clipping therefore tends to
+        # push both tails (large positives and negatives) back toward the origin.  If
+        # the negative coefficient magnitude is also reduced, the mean advantage will
+        # remain close to zero even when large positive samples are clipped; this is
+        # expected and simply reflects the per-prompt normalization.
+        clipped_valid_advantages = torch.clamp(
+            valid_advantages,
+            min=adv_min,
+            max=adv_max,
+        )
+
+        # Avoid in-place modification of the caller tensor while keeping the allocation count low.
+        output = advantages.clone()
+        output.masked_scatter_(mask, clipped_valid_advantages)
+
+    return output
 
 POLICY_LOSS_REGISTRY: dict[str, PolicyLossFn] = {}
 
@@ -852,7 +1022,9 @@ def compute_policy_loss(
         "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
         + f" but get the value: {clip_ratio_c}."
     )
-
+    
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
@@ -1004,6 +1176,8 @@ def compute_policy_loss_gspo(
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
 
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+
     negative_approx_kl = log_prob - old_log_prob
 
     # compute sequence-level importance ratio:
@@ -1064,6 +1238,8 @@ def compute_policy_loss_gpg(
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via GPG
     """
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    
     pg_losses = -log_prob * advantages
 
     # Apply rollout importance sampling weights if provided
@@ -1128,6 +1304,8 @@ def compute_policy_loss_clip_cov(
 
     assert clip_cov_ratio > 0, "clip_ratio should be larger than 0."
 
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    
     negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
@@ -1215,6 +1393,8 @@ def compute_policy_loss_kl_cov(
 
     assert kl_cov_ratio > 0, "kl_cov_ratio should be larger than 0."
 
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
+    
     negative_approx_kl = log_prob - old_log_prob
     abs_kl = negative_approx_kl.abs()
     ratio = torch.exp(negative_approx_kl)
@@ -1292,6 +1472,8 @@ def compute_policy_loss_geo_mean(
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
+    
+    advantages = _maybe_clip_advantages(advantages, old_log_prob, response_mask, config)
 
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability (uncomment it if you like)
